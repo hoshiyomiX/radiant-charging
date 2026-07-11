@@ -1,5 +1,49 @@
 # Changelog
 
+## [1.0.5] — 2026-07-11
+
+### Changed — Default cutoff 80→100 (auto-cut disabled by default)
+
+The default `cutoff` value has changed from `80` to `100`. Since battery
+capacity only reports 100% when the status is `Full` (at which point the
+MTK kernel has already internally cut off the charging path), setting
+`cutoff=100` effectively **disables the auto-cut feature** — the daemon
+becomes purely a thermal delimiter toggle.
+
+Users who want the auto-cut behavior must now explicitly set `cutoff` to
+a lower value (e.g., `cutoff = 80`) in their `config.toml`.
+
+#### Why this change
+
+The v1.0.3/v1.0.4 audit cycle revealed that the auto-cut feature was
+causing operational issues for the user (crash loops, config validation
+rejecting custom values). Rather than force a specific cutoff on all
+users, the daemon now ships with auto-cut disabled by default. Users
+who want it can opt in via config.
+
+The thermal delimiter feature (toggle NTC on charger plug/unplug) is
+unaffected and remains enabled by default.
+
+#### Files changed
+
+- `src/config.rs`: `default_cutoff()` returns `100`, `Default::default()`
+  uses `cutoff: 100`
+- `config.example.toml`: `cutoff = 100`
+- `README.md`: config table + "How it works" section updated
+
+#### Compatibility
+
+- Existing `config.toml` files with explicit `cutoff = 80` (or any value)
+  are unaffected — the default only applies when the field is missing.
+- `resume` default unchanged (still `70`).
+- Validation rules unchanged: `cutoff > resume`, `cutoff <= 100`,
+  `resume <= 100`.
+
+#### Verification
+
+- `cargo test`: 26/26 tests pass
+- Default config validates: `cutoff=100, resume=70` → `100 > 70` ✓
+
 ## [1.0.4] — 2026-07-11
 
 ### Hotfix — Strip over-engineered logic that caused crash loop

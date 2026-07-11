@@ -4,7 +4,7 @@
 # fields you want to override.
 
 # --- Auto-cut charging ---
-cutoff = 80
+cutoff = 100
 resume = 70
 
 # --- Debuggability ---

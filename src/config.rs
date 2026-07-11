@@ -4,7 +4,7 @@ use std::path::Path;
 
 // Default value functions for serde — allows partial TOML config files.
 fn default_cutoff() -> u8 {
-    80
+    100
 }
 fn default_resume() -> u8 {
     70
@@ -41,7 +41,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            cutoff: 80,
+            cutoff: 100,
             resume: 70,
             debug: false,
             log_file: "/data/adb/rsc/rsc.log".to_string(),

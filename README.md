@@ -1,6 +1,6 @@
 # rsc — Radiant Smart Charging
 
-[![Version](https://img.shields.io/badge/version-v1.0.4-blue.svg)](https://github.com/hoshiyomiX/radiant-smartcharging/releases/tag/v1.0.4)
+[![Version](https://img.shields.io/badge/version-v1.0.5-blue.svg)](https://github.com/hoshiyomiX/radiant-smartcharging/releases/tag/v1.0.5)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![CI](https://github.com/hoshiyomiX/radiant-smartcharging/actions/workflows/ci.yml/badge.svg)](https://github.com/hoshiyomiX/radiant-smartcharging/actions/workflows/ci.yml)
@@ -13,7 +13,7 @@
 Android devices (Transsion: Infinix / Tecno / Itel). It monitors battery
 state via **netlink uevents** (pure event-driven, zero polling) and:
 
-1. **Auto-cuts charging** at a configurable percentage (default 80%).
+1. **Auto-cuts charging** at a configurable percentage (default 100% = disabled; set lower to enable).
 2. **Resumes charging** at a lower percentage (default 70%) with hysteresis.
 3. **Toggles the MTK NTC thermal delimiter** on charger plug/unplug.
 
@@ -91,7 +91,7 @@ specify only the fields you want to override.
 
 | Key | Default | Description |
 | --- | --- | --- |
-| `cutoff` | `80` | % at which charging is cut off |
+| `cutoff` | `100` | % at which charging is cut off (100 = disabled, kernel auto-cuts at Full) |
 | `resume` | `70` | % at which charging resumes (hysteresis) |
 | `debug` | `false` | Verbose logging of every event/tick |
 | `log_file` | `/data/adb/rsc/rsc.log` | Log file path |

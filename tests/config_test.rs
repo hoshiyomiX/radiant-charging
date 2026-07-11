@@ -52,7 +52,7 @@ fn test_default_config_is_valid() {
 fn test_example_config_parses() {
     let content = fs::read_to_string("./config.example.toml").expect("config.example.toml missing");
     let (cutoff, resume) = parse_toml_cutoff_resume(&content);
-    assert_eq!(cutoff, Some(80));
+    assert_eq!(cutoff, Some(100));
     assert_eq!(resume, Some(70));
     assert!(is_valid_range(cutoff.unwrap(), resume.unwrap()));
 }
