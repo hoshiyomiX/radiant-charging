@@ -288,9 +288,7 @@ fn utf8_lossy(buf: &[u8]) -> String {
             Err(e) => {
                 let valid_up_to = e.valid_up_to();
                 if valid_up_to > 0 {
-                    result.push_str(
-                        std::str::from_utf8(&buf[i..i + valid_up_to]).unwrap_or(""),
-                    );
+                    result.push_str(std::str::from_utf8(&buf[i..i + valid_up_to]).unwrap_or(""));
                 }
                 result.push('\u{FFFD}');
                 i += valid_up_to + 1;

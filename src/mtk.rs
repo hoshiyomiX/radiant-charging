@@ -35,8 +35,8 @@
 //! reset), then re-apply 1, then write current_cmd. This pattern is now
 //! applied symmetrically to both cut_off and resume (RSC-006).
 
-use std::fs::OpenOptions;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::Ordering;

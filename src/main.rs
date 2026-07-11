@@ -1057,7 +1057,10 @@ fn main() {
     let _lock = match acquire_lock() {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("rsc: another daemon instance is already running (lock held): {}", e);
+            eprintln!(
+                "rsc: another daemon instance is already running (lock held): {}",
+                e
+            );
             process::exit(1);
         }
     };
