@@ -1,5 +1,149 @@
 # Changelog
 
+## [1.0.3] — 2026-07-11
+
+### Security & robustness — Comprehensive Rust audit fixes
+
+This release addresses 27 of 29 findings from a comprehensive static
+analysis audit of the Rust codebase. All 7 CRITICAL bugs are fixed,
+including a show-stopper where the kernel-flip debounce feature
+(documented in v1.0.1) was completely non-functional due to a state
+update ordering bug.
+
+#### CRITICAL fixes (7)
+
+- **RSC-001: Kernel-flip debounce dead code fixed.** The
+  `last_charge_flip` tracking field was never updated because
+  `self.last_state` was overwritten to the current state *before*
+  the flip-detection check. The entire debounce feature (documented
+  in `docs/KERNEL_FLIP_DEBUG.md` and the `CHARGE_FLIP_DEBOUNCE`
+  constant) was dead code. Now captures `prev_charging` before the
+  update, so spurious kernel state flips (USB PD renegotiation, MTK
+  fuel-gauge jitter) are correctly suppressed.
+- **RSC-002: Log data loss in `--cleanup` fixed.** If `fs::rename`
+  failed during rotation, the unconditional `OpenOptions::truncate`
+  would destroy the active log file without saving it to
+  `rsc-lastboot.log`. Now only truncates if rotation succeeded.
+- **RSC-003: Cleanup state desync fixed.** `--cleanup` no longer
+  resets MTK state when the daemon is running. Uses an `flock`-based
+  lock file (`/data/adb/rsc/rsc.lock`) to detect a running daemon.
+- **RSC-004: Blocking sleep in MTK operations fixed.** Added
+  `interruptible_sleep()` that checks `RUNNING` every 10ms. Replaces
+  bare `thread::sleep` in `resume_charging` (100ms total) and the
+  5s error backoff in `run_uevent`. SIGTERM is no longer delayed.
+- **RSC-005: Non-atomic MTK sysfs writes fixed.** All multi-write
+  MTK operations now attempt rollback on partial failure (re-apply
+  cut flag, clear thermal knobs, etc.) to avoid leaving the kernel
+  in an inconsistent state.
+- **RSC-006: Cut-off charging now uses reset+re-apply pattern.**
+  `cut_off_charging` previously used a naive two-step write that
+  can silently fail on MTK BSP revisions that latch state — the
+  same failure mode that motivated the robust pattern in
+  `resume_charging`. Now applies the pattern symmetrically.
+- **RSC-007: Config validation for log params.** `log_max_size_kb = 0`
+  previously caused rotation on every single log line (I/O storm,
+  flash wear on eMMC). Now rejected at config load time.
+
+#### HIGH fixes (9)
+
+- **RSC-008: Panic hook restores MTK state.** With `panic = "abort"`,
+  panics call abort immediately without running `Drop` impls. A panic
+  hook now calls `disable_thermal_delimiter()` + `resume_charging()`
+  before aborting.
+- **RSC-009: No more busy-loop on `WouldBlock`.** `recv_blocking`
+  previously had a `continue` loop on EAGAIN that could pin a CPU
+  core at 100%. Now returns `Err` for the caller to handle.
+- **RSC-010: Parse failure counter added.** Uevent parse failures
+  are now counted as `parse_failures` in stats, not silently counted
+  as irrelevant events.
+- **RSC-011: TOCTOU in `write_sysctl` fixed.** Removed the
+  `Path::exists()` check that raced with `open()`. Now matches on
+  `NotFound` from `open()` directly.
+- **RSC-012: Sysfs write verification.** `enable_thermal_delimiter`
+  and `disable_thermal_delimiter` now read back the sysfs values to
+  verify the write took effect.
+- **RSC-013: Config errors in `--cleanup` propagated.** Previously
+  used `unwrap_or_default()` which silently fell back to defaults
+  (potentially rotating the wrong log file if user had a custom
+  `log_file` path). Now logs the error to stderr.
+- **RSC-014: SIGHUP warning logged.** SIGHUP conventionally means
+  reload, but rsc terminates. A warning is now logged in `shutdown()`
+  to make this explicit.
+- **RSC-015: 60s heartbeat safety net.** `run_uevent` now uses
+  `poll()` with a 60s timeout as a safety net for lost uevents
+  (driver bug, socket buffer overflow). `poll()` blocks the process
+  (zero CPU), preserving the "zero CPU when idle" design.
+- **RSC-016: Lock file prevents concurrent daemons.** An exclusive
+  `flock` on `/data/adb/rsc/rsc.lock` is acquired at startup. If the
+  lock is held, the daemon exits with an error instead of corrupting
+  state by running concurrently with another instance.
+
+#### MEDIUM fixes (7)
+
+- **RSC-017: Log rotation counter sync.** `bytes_written` is now
+  only reset to 0 if rotation succeeded. Previously a failed rename
+  left the counter at 0 while the file stayed large, causing
+  unbounded log growth.
+- **RSC-018: Partial read fix.** `read_capacity` and
+  `read_charge_state` now use `read_to_string` instead of a single
+  `read()` syscall, preventing partial reads from sysfs under memory
+  pressure.
+- **RSC-019: Comment/code mismatch fixed.** `parse_uevent` now
+  prefers explicit `ACTION=`/`DEVPATH=` over the first-line parse,
+  matching the doc comment (previously did the opposite).
+- **RSC-020: Log file permissions restricted.** Log file is now
+  created with mode `0o600` (owner-only) via `OpenOptionsExt`,
+  instead of default umask (`0o644`, world-readable).
+- **RSC-021: Minimum hysteresis enforced.** Config validation now
+  rejects `cutoff - resume < 5` to prevent rapid battery cycling
+  (e.g., cutoff=80, resume=79) that degrades battery health.
+- **RSC-022: Dead return value removed.** `tick()` previously
+  returned `bool` that was never used by the caller. Now returns
+  `()`.
+- **RSC-023: EINTR counter added.** Signal interrupts on uevent
+  recv are now counted as `signal_interrupts` in stats, aiding
+  shutdown diagnosis.
+
+#### LOW fixes (4)
+
+- **RSC-024: 10 unit tests added for `Config::validate()`.** Tests
+  cover all validation rules (cutoff/resume range, log params,
+  hysteresis). These complement the integration-style tests in
+  `tests/config_test.rs`.
+- **RSC-027: `try_drain` stack buffer eliminated.** Uses `MSG_TRUNC`
+  with a null buffer instead of allocating an unused 8KB stack
+  buffer per call.
+- **RSC-028: Lossy UTF-8 decoding.** `parse_uevent` no longer
+  silently drops uevent parts containing invalid UTF-8. Invalid
+  bytes are replaced with U+FFFD.
+- **RSC-029: README version badge updated to v1.0.3.**
+
+#### Deferred (2 — LOW severity, require significant refactoring)
+
+- **RSC-025: No unit tests for `Daemon::tick()` state machine.**
+  Requires dependency injection refactor (mock battery reads + MTK
+  writes) to test without real hardware.
+- **RSC-026: `parse_uevent` String allocations.** Requires lifetime
+  annotations on `Uevent` (API change) to borrow from the input
+  buffer instead of allocating.
+
+#### Verification
+
+- `cargo check`: PASS (0 errors, 0 warnings)
+- `cargo clippy`: PASS (0 warnings)
+- `cargo test`: 28/28 tests pass (23 unit + 5 integration)
+
+#### Compatibility
+
+- No breaking config changes. Existing `config.toml` files work
+  unchanged. The only new validation rejections (`log_max_size_kb=0`,
+  `log_keep=0`, hysteresis < 5) were already broken configs that
+  would cause runtime problems.
+- New `/data/adb/rsc/rsc.lock` lock file is created automatically.
+  No user action required.
+- 60s heartbeat does not change normal behavior — it only fires
+  when no uevent arrives within 60s (rare; indicates lost uevents).
+
 ## [1.0.2] — 2026-06-29
 
 ### Changed — Use device local timezone (not hardcoded WITA)
