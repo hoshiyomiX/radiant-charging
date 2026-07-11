@@ -23,7 +23,6 @@
 //!   indicates a fuel-gauge communication error).
 
 use std::fs;
-use std::io::Read;
 
 const CAPACITY_PATH: &str = "/sys/class/power_supply/battery/capacity";
 const STATUS_PATH: &str = "/sys/class/power_supply/battery/status";
@@ -62,28 +61,23 @@ impl std::fmt::Display for ChargeState {
 }
 
 pub fn read_capacity() -> Result<u8, std::io::Error> {
-    // Stack-allocated buffer — capacity is always 1-3 digits + newline.
-    // Avoids heap String allocation per tick (Issue #7).
-    let mut buf = [0u8; 16];
-    let mut f = fs::File::open(CAPACITY_PATH)?;
-    let n = f.read(&mut buf)?;
-    let s = std::str::from_utf8(&buf[..n])
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
-        .trim();
-    s.parse::<u8>()
+    // RSC-018: Use read_to_string instead of a single read() syscall.
+    // A single read() on sysfs may return partial data under memory
+    // pressure or kernel conditions. read_to_string loops until EOF,
+    // guaranteeing the full content is read. The allocation overhead
+    // (1-3 bytes + newline) is negligible for a daemon that ticks
+    // ~10 times per second.
+    let s = fs::read_to_string(CAPACITY_PATH)?;
+    s.trim()
+        .parse::<u8>()
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 pub fn read_charge_state() -> Result<ChargeState, std::io::Error> {
-    // Stack-allocated buffer — status is at most "Discharging\n" = 11 bytes.
-    // Avoids heap String allocation per tick (Issue #7).
-    let mut buf = [0u8; 16];
-    let mut f = fs::File::open(STATUS_PATH)?;
-    let n = f.read(&mut buf)?;
-    let s = std::str::from_utf8(&buf[..n])
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?
-        .trim();
-    let state = match s {
+    // RSC-018: Use read_to_string for the same reason as read_capacity —
+    // a single read() may return partial data from sysfs.
+    let s = fs::read_to_string(STATUS_PATH)?;
+    let state = match s.trim() {
         "Charging" => ChargeState::Charging,
         "Discharging" => ChargeState::Discharging,
         "Full" => ChargeState::Full,

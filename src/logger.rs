@@ -37,6 +37,7 @@
 use chrono::Local;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -122,8 +123,13 @@ impl FileLogger {
         // and re-synced periodically via the slow-path below.
         let current = self.bytes_written.load(Ordering::Relaxed);
         if current >= self.max_bytes {
-            self.rotate();
-            self.bytes_written.store(0, Ordering::Relaxed);
+            // RSC-017: Only reset bytes_written if rotation succeeded.
+            // Previously, a failed rename would leave the counter at 0
+            // while the file remained at its original (large) size,
+            // causing unbounded log growth.
+            if self.rotate() {
+                self.bytes_written.store(0, Ordering::Relaxed);
+            }
         }
 
         // Parent dir creation is now once-only at construction (Issue #4).
@@ -132,6 +138,7 @@ impl FileLogger {
         if let Ok(mut f) = OpenOptions::new()
             .create(true)
             .append(true)
+            .mode(0o600) // RSC-020: restrict to owner-only (root)
             .open(&self.path)
         {
             if f.write_all(line_bytes).is_ok() {
@@ -140,7 +147,12 @@ impl FileLogger {
         }
     }
 
-    fn rotate(&self) {
+    /// RSC-017: Rotate the log file. Returns true if the active log was
+    /// successfully renamed to .1 (the critical step). Non-critical rename
+    /// failures (shifting .1 -> .2, etc.) are logged but don't cause the
+    /// function to return false — the active file was still moved out of
+    /// the way, so the counter reset is valid.
+    fn rotate(&self) -> bool {
         // Drop the oldest, shift the rest up.
         let oldest = self.rotated_path(self.keep);
         if oldest.exists() {
@@ -153,9 +165,11 @@ impl FileLogger {
                 let _ = fs::rename(&from, &to);
             }
         }
-        // Active -> .1
+        // Active -> .1 — this is the critical rename. If it fails, the
+        // active log file still exists with its full content, so we must
+        // NOT reset the byte counter (that would cause unbounded growth).
         let to = self.rotated_path(1);
-        let _ = fs::rename(&self.path, &to);
+        fs::rename(&self.path, &to).is_ok()
     }
 
     fn rotated_path(&self, n: u32) -> PathBuf {

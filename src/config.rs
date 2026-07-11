@@ -109,6 +109,109 @@ impl Config {
                 "cutoff and resume must be in 0..=100".to_string(),
             ));
         }
+        // RSC-007: Prevent log_max_size_kb = 0 which causes rotation on
+        // every single log line (I/O storm, flash wear on eMMC).
+        if self.log_max_size_kb == 0 {
+            return Err(ConfigError::InvalidRange(
+                "log_max_size_kb must be > 0 (0 causes rotation on every log line)"
+                    .to_string(),
+            ));
+        }
+        // RSC-007: Prevent log_keep = 0.
+        if self.log_keep == 0 {
+            return Err(ConfigError::InvalidRange(
+                "log_keep must be > 0".to_string(),
+            ));
+        }
+        // RSC-021: Enforce minimum hysteresis to prevent rapid battery
+        // cycling (cut at 80, resume at 79, charge back to 80, ...) which
+        // degrades lithium-ion battery health.
+        const MIN_HYSTERESIS: u8 = 5;
+        let hysteresis = self.cutoff.saturating_sub(self.resume);
+        if hysteresis < MIN_HYSTERESIS {
+            return Err(ConfigError::InvalidRange(format!(
+                "hysteresis (cutoff - resume = {}) must be >= {} to prevent battery cycling",
+                hysteresis, MIN_HYSTERESIS
+            )));
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // RSC-024: Unit tests that exercise the REAL Config::validate()
+    // function (not a re-implementation). These complement the
+    // integration-style tests in tests/config_test.rs.
+
+    #[test]
+    fn test_validate_default_config_ok() {
+        let cfg = Config::default();
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_cutoff_equal_resume_rejected() {
+        let cfg = Config { cutoff: 80, resume: 80, ..Config::default() };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_cutoff_below_resume_rejected() {
+        let cfg = Config { cutoff: 70, resume: 80, ..Config::default() };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_cutoff_above_100_rejected() {
+        let cfg = Config { cutoff: 101, resume: 70, ..Config::default() };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_resume_above_100_rejected() {
+        let cfg = Config { cutoff: 80, resume: 101, ..Config::default() };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_log_max_size_zero_rejected() {
+        let cfg = Config { log_max_size_kb: 0, ..Config::default() };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_log_keep_zero_rejected() {
+        let cfg = Config { log_keep: 0, ..Config::default() };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_insufficient_hysteresis_rejected() {
+        // 80 - 79 = 1 < MIN_HYSTERESIS(5)
+        let cfg = Config { cutoff: 80, resume: 79, ..Config::default() };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_minimum_hysteresis_accepted() {
+        // 80 - 75 = 5 >= MIN_HYSTERESIS(5)
+        let cfg = Config { cutoff: 80, resume: 75, ..Config::default() };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_generous_hysteresis_accepted() {
+        let cfg = Config { cutoff: 95, resume: 50, ..Config::default() };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_zero_cutoff_zero_resume_rejected() {
+        // cutoff == resume (both 0) — rejected by cutoff <= resume check
+        let cfg = Config { cutoff: 0, resume: 0, ..Config::default() };
+        assert!(cfg.validate().is_err());
     }
 }
