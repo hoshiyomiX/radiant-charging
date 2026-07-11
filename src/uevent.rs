@@ -8,7 +8,6 @@
 //! Socket setup:
 //!   - AF_NETLINK, SOCK_RAW, NETLINK_KOBJECT_UEVENT (15)
 //!   - bind to sockaddr_nl { nl_pid=0, nl_groups=1 } (kobject multicast)
-//!   - RSC-015: poll(2) with 60s heartbeat timeout as lost-uevent safety net
 //!
 //! Message format (NULL-separated strings, first line is "ACTION@DEVPATH"):
 //!   change@/devices/.../power_supply/battery\0
@@ -25,7 +24,6 @@
 
 use std::io;
 use std::os::unix::io::RawFd;
-use std::time::Duration;
 
 /// Netlink protocol number for kobject uevents (from <linux/netlink.h>).
 const NETLINK_KOBJECT_UEVENT: i32 = 15;
@@ -66,13 +64,6 @@ impl Uevent {
     /// so we don't miss plug-in/out of alternate power supplies.
     pub fn is_relevant(&self) -> bool {
         self.subsystem == RELEVANT_SUBSYSTEM && self.devpath.contains(RELEVANT_DEVPATH_FRAGMENT)
-    }
-
-    /// RSC-010: True if this Uevent was constructed as a fallback for a
-    /// parse failure. The caller uses this to increment the parse_failures
-    /// stat counter instead of counting the event as relevant/irrelevant.
-    pub fn is_parse_failure(&self) -> bool {
-        self.action.is_empty() && self.devpath.is_empty() && self.subsystem.is_empty()
     }
 
     /// Compact one-line summary for debug logs.
@@ -142,12 +133,9 @@ impl UeventListener {
     /// an event is received or a signal interrupts (EINTR).
     ///
     /// Returns:
-    ///   - `Ok(event)` — event received (may be a parse-failure fallback;
-    ///     check `is_parse_failure()`)
+    ///   - `Ok(event)` — event received
     ///   - `Err(EINTR)` — signal interrupted recv, caller checks RUNNING
-    ///   - `Err(WouldBlock)` — RSC-009: returned instead of busy-looping
     ///   - `Err(other)` — real socket error
-    #[allow(dead_code)]
     pub fn recv_blocking(&self) -> Result<Uevent, io::Error> {
         let mut buf = [0u8; RECV_BUFFER_SIZE];
         loop {
@@ -159,10 +147,8 @@ impl UeventListener {
                 if err.kind() == io::ErrorKind::Interrupted {
                     return Err(err);
                 }
-                // RSC-009: Return Err on WouldBlock instead of busy-looping.
-                // On a blocking socket this shouldn't happen, but if it does
-                // (buggy fcntl, kernel bug), returning Err lets the caller
-                // decide how to handle it rather than pinning a CPU core.
+                // EAGAIN/EWOULDBLOCK shouldn't happen on blocking socket,
+                // but handle defensively — return Err instead of busy-looping.
                 return Err(err);
             }
             if n == 0 {
@@ -179,57 +165,6 @@ impl UeventListener {
         }
     }
 
-    /// RSC-015: Block until a uevent arrives OR the timeout elapses.
-    /// Uses poll(2) for the timeout — the process stays asleep (zero CPU)
-    /// until either an event arrives or the timeout fires. This is a
-    /// safety net for lost uevents: if the kernel fails to emit a uevent
-    /// when capacity crosses cutoff (driver bug, socket buffer overflow),
-    /// the timeout triggers a tick() to re-check state.
-    ///
-    /// Returns:
-    ///   - `Ok(Some(event))` — event received
-    ///   - `Ok(None)` — timeout elapsed, caller should tick() as safety net
-    ///   - `Err(EINTR)` — signal interrupted, caller checks RUNNING
-    ///   - `Err(other)` — real socket error
-    pub fn recv_with_timeout(&self, timeout: Duration) -> Result<Option<Uevent>, io::Error> {
-        let mut pfd = libc::pollfd {
-            fd: self.fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let timeout_ms = timeout.as_millis() as libc::c_int;
-        let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-        if rc < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if rc == 0 {
-            return Ok(None); // timeout
-        }
-        // fd is ready — call recv with MSG_DONTWAIT (data is available, so
-        // this won't block; MSG_DONTWAIT handles spurious wakeups).
-        let mut buf = [0u8; RECV_BUFFER_SIZE];
-        let n = unsafe {
-            libc::recv(
-                self.fd,
-                buf.as_mut_ptr() as *mut libc::c_void,
-                buf.len(),
-                libc::MSG_DONTWAIT,
-            )
-        };
-        if n <= 0 {
-            // Spurious wakeup or EAGAIN — treat as timeout so caller ticks.
-            return Ok(None);
-        }
-        Ok(Some(parse_uevent(&buf[..n as usize]).unwrap_or(Uevent {
-            action: String::new(),
-            devpath: String::new(),
-            subsystem: String::new(),
-            capacity: None,
-            status: None,
-            seqnum: None,
-        })))
-    }
-
     /// Non-blocking drain of any queued events. Returns the number of
     /// events drained (regardless of relevance). Used to coalesce
     /// multiple rapid-fire uevents (e.g. on charger plug-in, kernel
@@ -237,11 +172,10 @@ impl UeventListener {
     pub fn try_drain(&self) -> usize {
         let mut count = 0;
         loop {
-            // RSC-027: Use MSG_TRUNC with a null buffer to drain without
-            // allocating an 8KB stack buffer. MSG_TRUNC on netlink sockets
-            // consumes the datagram and returns its actual size, even when
-            // the buffer is zero-length. Previously allocated an unused
-            // 8KB stack buffer per call.
+            // Use MSG_TRUNC with a null buffer to drain without allocating
+            // an 8KB stack buffer. MSG_TRUNC on netlink sockets consumes
+            // the datagram and returns its actual size, even when the
+            // buffer is zero-length.
             let n = unsafe {
                 libc::recv(
                     self.fd,
@@ -272,50 +206,19 @@ impl Drop for UeventListener {
 /// subsequent strings are "KEY=VALUE" pairs. We extract the keys we
 /// care about (ACTION, DEVPATH, SUBSYSTEM, POWER_SUPPLY_CAPACITY,
 /// POWER_SUPPLY_STATUS, SEQNUM) and ignore the rest.
-/// RSC-028: Manual lossy UTF-8 decoder. Replaces invalid byte sequences
-/// with U+FFFD (replacement character) instead of dropping them. This is
-/// equivalent to std::str::from_utf8_lossy but implemented manually because
-/// from_utf8_lossy is not available in this Rust version (1.97+).
-fn utf8_lossy(buf: &[u8]) -> String {
-    let mut result = String::with_capacity(buf.len());
-    let mut i = 0;
-    while i < buf.len() {
-        match std::str::from_utf8(&buf[i..]) {
-            Ok(s) => {
-                result.push_str(s);
-                break;
-            }
-            Err(e) => {
-                let valid_up_to = e.valid_up_to();
-                if valid_up_to > 0 {
-                    result.push_str(std::str::from_utf8(&buf[i..i + valid_up_to]).unwrap_or(""));
-                }
-                result.push('\u{FFFD}');
-                i += valid_up_to + 1;
-            }
-        }
-    }
-    result
-}
-
 fn parse_uevent(buf: &[u8]) -> Option<Uevent> {
-    // RSC-028: Manual lossy UTF-8 conversion — replaces invalid bytes with
-    // U+FFFD (replacement character) instead of silently dropping parts
-    // that contain invalid UTF-8. Previously, from_utf8().ok() was used
-    // which dropped entire parts on any invalid byte. std::str::from_utf8_lossy
-    // is not available in this Rust version, so we implement a simple
-    // equivalent using from_utf8 + valid_up_to.
-    let text = utf8_lossy(buf);
-    // Split on NUL bytes (same as splitting on '\0' in UTF-8).
-    let parts: Vec<&str> = text.split('\0').filter(|s| !s.is_empty()).collect();
+    // Split on NUL bytes; collect into Vec<&str> (filter out empty trailing).
+    let parts: Vec<&str> = buf
+        .split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| std::str::from_utf8(s).ok())
+        .collect();
 
     if parts.is_empty() {
         return None;
     }
 
     // First part is "ACTION@DEVPATH" — split on '@'.
-    // This is used as a fallback; explicit ACTION= / DEVPATH= fields
-    // below take precedence.
     let mut action = String::new();
     let mut devpath = String::new();
     if let Some(at_pos) = parts[0].find('@') {
@@ -329,22 +232,24 @@ fn parse_uevent(buf: &[u8]) -> Option<Uevent> {
     let mut status: Option<String> = None;
     let mut seqnum: Option<String> = None;
 
-    // RSC-019: Always prefer explicit ACTION= / DEVPATH= / SUBSYSTEM=
-    // over the first-line parse — more reliable across kernel versions.
-    // Previously, the code only used explicit fields as a fallback when
-    // the first-line parse failed, which contradicted the comment.
     for part in &parts[1..] {
-        if let Some(rest) = part.strip_prefix("ACTION=") {
-            action = rest.to_string();
-            continue;
+        if action.is_empty() {
+            if let Some(rest) = part.strip_prefix("ACTION=") {
+                action = rest.to_string();
+                continue;
+            }
         }
-        if let Some(rest) = part.strip_prefix("DEVPATH=") {
-            devpath = rest.to_string();
-            continue;
+        if devpath.is_empty() {
+            if let Some(rest) = part.strip_prefix("DEVPATH=") {
+                devpath = rest.to_string();
+                continue;
+            }
         }
-        if let Some(rest) = part.strip_prefix("SUBSYSTEM=") {
-            subsystem = rest.to_string();
-            continue;
+        if subsystem.is_empty() {
+            if let Some(rest) = part.strip_prefix("SUBSYSTEM=") {
+                subsystem = rest.to_string();
+                continue;
+            }
         }
         if capacity.is_none() {
             if let Some(rest) = part.strip_prefix("POWER_SUPPLY_CAPACITY=") {

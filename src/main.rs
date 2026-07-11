@@ -35,10 +35,9 @@ mod mtk;
 mod uevent;
 
 use std::fs;
-use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std::process;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -47,21 +46,11 @@ use nix::unistd::Uid;
 
 const CONFIG_PATH: &str = "/data/adb/rsc/config.toml";
 const BOOT_ID_PATH: &str = "/proc/sys/kernel/random/boot_id";
-/// RSC-003/RSC-016: Lock file path — used to prevent concurrent daemon
-/// instances and to let --cleanup detect a running daemon.
-const LOCK_PATH: &str = "/data/adb/rsc/rsc.lock";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// RSC-016: Made pub(crate) so mtk::interruptible_sleep can check it.
-pub(crate) static RUNNING: AtomicBool = AtomicBool::new(true);
+static RUNNING: AtomicBool = AtomicBool::new(true);
 
-/// RSC-014: Tracks which signal triggered shutdown. Checked in shutdown()
-/// to log a SIGHUP-specific warning (SIGHUP conventionally means reload,
-/// but rsc terminates — the warning makes this explicit).
-static LAST_SIGNAL: AtomicI32 = AtomicI32::new(0);
-
-extern "C" fn handle_signal(sig: i32) {
-    LAST_SIGNAL.store(sig, Ordering::SeqCst);
+extern "C" fn handle_signal(_sig: i32) {
     RUNNING.store(false, Ordering::SeqCst);
 }
 
@@ -69,49 +58,8 @@ fn install_signal_handlers() {
     unsafe {
         let _ = signal::signal(Signal::SIGINT, SigHandler::Handler(handle_signal));
         let _ = signal::signal(Signal::SIGTERM, SigHandler::Handler(handle_signal));
-        // RSC-014: SIGHUP terminates (not reloads) — documented in shutdown().
         let _ = signal::signal(Signal::SIGHUP, SigHandler::Handler(handle_signal));
     }
-}
-
-/// RSC-003/RSC-016: Acquire an exclusive non-blocking flock on the lock
-/// file. Returns Ok(File) if the lock was acquired (hold the File to
-/// keep the lock; drop it to release). Returns Err if the lock is
-/// already held by another process (daemon is running).
-fn acquire_lock() -> Result<std::fs::File, std::io::Error> {
-    if let Some(parent) = Path::new(LOCK_PATH).parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let f = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(LOCK_PATH)?;
-    let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(f)
-}
-
-/// RSC-008: Install a panic hook that restores MTK state before aborting.
-/// With `panic = "abort"` in Cargo.toml, panics call abort immediately —
-/// without this hook, the kernel would be left with charging disabled
-/// and/or thermal delimiter enabled after a panic.
-fn install_panic_hook() {
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        // Best-effort MTK state restoration. These are simple sysfs/procfs
-        // writes that don't acquire any daemon locks, so they're safe to
-        // call from a panic handler.
-        let _ = mtk::disable_thermal_delimiter();
-        let _ = mtk::resume_charging();
-        eprintln!(
-            "rsc: PANIC \u{2014} MTK state restored (thermal off, charging resumed), aborting: {}",
-            info
-        );
-        default_hook(info);
-    }));
 }
 
 fn require_root() {
@@ -174,10 +122,6 @@ struct Stats {
     thermal_toggles: AtomicU64,
     cut_events: AtomicU64,
     resume_events: AtomicU64,
-    /// RSC-010: Count of uevent parse failures (malformed messages).
-    parse_failures: AtomicU64,
-    /// RSC-023: Count of EINTR (signal interrupts) on uevent recv.
-    signal_interrupts: AtomicU64,
 }
 
 impl Stats {
@@ -192,13 +136,11 @@ impl Stats {
             thermal_toggles: AtomicU64::new(0),
             cut_events: AtomicU64::new(0),
             resume_events: AtomicU64::new(0),
-            parse_failures: AtomicU64::new(0),
-            signal_interrupts: AtomicU64::new(0),
         }
     }
 
     /// Render stats as logfmt-style kv pairs. Caller prepends "stats" message.
-    fn kv_snapshot(&self) -> [(&'static str, String); 11] {
+    fn kv_snapshot(&self) -> [(&'static str, String); 9] {
         [
             ("ticks", self.ticks.load(Ordering::Relaxed).to_string()),
             (
@@ -227,16 +169,6 @@ impl Stats {
                 self.resume_events.load(Ordering::Relaxed).to_string(),
             ),
             ("errors", self.errors.load(Ordering::Relaxed).to_string()),
-            // RSC-010: Parse failure counter.
-            (
-                "parse_failures",
-                self.parse_failures.load(Ordering::Relaxed).to_string(),
-            ),
-            // RSC-023: Signal interrupt counter.
-            (
-                "signal_interrupts",
-                self.signal_interrupts.load(Ordering::Relaxed).to_string(),
-            ),
         ]
     }
 }
@@ -436,24 +368,10 @@ impl Daemon {
         // Initial tick to establish baseline state.
         self.tick();
 
-        // RSC-015: Heartbeat timeout — if no uevent arrives within this
-        // duration, tick() as a safety net to catch state changes that
-        // occurred without a uevent (lost uevents, socket buffer overflow).
-        // poll() blocks the process (zero CPU), so this doesn't violate
-        // the "zero CPU when idle" design.
-        const HEARTBEAT: Duration = Duration::from_secs(60);
-
         while RUNNING.load(Ordering::SeqCst) {
-            match uevent.recv_with_timeout(HEARTBEAT) {
-                Ok(Some(event)) => {
+            match uevent.recv_blocking() {
+                Ok(event) => {
                     self.stats.events_received.fetch_add(1, Ordering::Relaxed);
-
-                    // RSC-010: Count parse failures separately from
-                    // relevant/irrelevant events.
-                    if event.is_parse_failure() {
-                        self.stats.parse_failures.fetch_add(1, Ordering::Relaxed);
-                        continue;
-                    }
 
                     if event.is_relevant() {
                         self.stats.events_relevant.fetch_add(1, Ordering::Relaxed);
@@ -476,14 +394,8 @@ impl Daemon {
                         self.stats.events_irrelevant.fetch_add(1, Ordering::Relaxed);
                     }
                 }
-                Ok(None) => {
-                    // RSC-015: Heartbeat timeout — tick as safety net.
-                    self.tick();
-                }
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::Interrupted {
-                        // RSC-023: Count EINTR for observability.
-                        self.stats.signal_interrupts.fetch_add(1, Ordering::Relaxed);
                         // EINTR from signal — check RUNNING at top of loop.
                         continue;
                     }
@@ -499,14 +411,7 @@ impl Daemon {
                             ("retry_secs", "5"),
                         ],
                     );
-                    // RSC-004: Use interruptible sleep so SIGTERM isn't
-                    // delayed by the full 5s backoff.
-                    let mut remaining = Duration::from_secs(5);
-                    while remaining > Duration::ZERO && RUNNING.load(Ordering::SeqCst) {
-                        let step = remaining.min(Duration::from_millis(100));
-                        thread::sleep(step);
-                        remaining -= step;
-                    }
+                    thread::sleep(Duration::from_secs(5));
                 }
             }
         }
@@ -795,17 +700,6 @@ impl Daemon {
     }
 
     fn shutdown(&mut self) {
-        // RSC-014: If SIGHUP triggered the shutdown, log a warning that
-        // config reload is not supported (SIGHUP conventionally means
-        // reload, but rsc terminates).
-        let sig = LAST_SIGNAL.load(Ordering::SeqCst);
-        if sig == libc::SIGHUP {
-            self.log.log_kv(
-                "WARN",
-                "received SIGHUP \u{2014} terminating (config reload not supported)",
-                &[("event", "signal"), ("signal", "SIGHUP")],
-            );
-        }
         self.log.log_kv(
             "INFO",
             "rsc shutting down",
@@ -870,37 +764,25 @@ fn run_cleanup(cfg: &config::Config) -> i32 {
     // is configured to capture them, otherwise silent).
     eprintln!("rsc: --cleanup starting (boot_id={})", read_boot_id());
 
-    // RSC-003: Try to acquire the lock. If it fails, the daemon is
-    // running — skip MTK state reset to avoid desync (the daemon's
-    // in-memory state would diverge from kernel state). The lock is
-    // held for the duration of cleanup to prevent a race where the
-    // daemon starts between the lock check and the MTK reset.
-    let _lock_guard = acquire_lock();
-    let daemon_running = _lock_guard.is_err();
-    if daemon_running {
-        eprintln!("rsc: --cleanup WARN: daemon appears to be running (lock held)");
-        eprintln!("rsc: --cleanup WARN: skipping MTK state reset to avoid state desync");
-    }
-
-    // 1. Restore MTK state — only if daemon is NOT running.
-    if !daemon_running {
-        if mtk::paths_exist() {
-            match mtk::disable_thermal_delimiter() {
-                Ok(_) => eprintln!(
-                    "rsc: --cleanup thermal delimiter restored (disable_nafg=0, ntc_disable_nafg=0)"
-                ),
-                Err(e) => eprintln!(
-                    "rsc: --cleanup WARN: disable_thermal_delimiter failed: {}",
-                    e
-                ),
-            }
-            match mtk::resume_charging() {
-                Ok(_) => eprintln!("rsc: --cleanup charging path restored (current_cmd=0 0)"),
-                Err(e) => eprintln!("rsc: --cleanup WARN: resume_charging failed: {}", e),
-            }
-        } else {
-            eprintln!("rsc: --cleanup MTK paths missing \u{2014} skipping sysfs restore");
+    // 1. Restore MTK state — always do this defensively, ignore errors
+    //    (paths may not exist on non-MTK devices, but we already validated
+    //    them in main() before calling this).
+    if mtk::paths_exist() {
+        match mtk::disable_thermal_delimiter() {
+            Ok(_) => eprintln!(
+                "rsc: --cleanup thermal delimiter restored (disable_nafg=0, ntc_disable_nafg=0)"
+            ),
+            Err(e) => eprintln!(
+                "rsc: --cleanup WARN: disable_thermal_delimiter failed: {}",
+                e
+            ),
         }
+        match mtk::resume_charging() {
+            Ok(_) => eprintln!("rsc: --cleanup charging path restored (current_cmd=0 0)"),
+            Err(e) => eprintln!("rsc: --cleanup WARN: resume_charging failed: {}", e),
+        }
+    } else {
+        eprintln!("rsc: --cleanup MTK paths missing — skipping sysfs restore");
     }
 
     // 2. Rotate rsc.log -> rsc-lastboot.log (single file, overwrite if exists)
@@ -1050,20 +932,6 @@ fn main() {
     };
 
     install_signal_handlers();
-    install_panic_hook();
-
-    // RSC-016: Acquire lock file to prevent concurrent daemon instances.
-    // If the lock is held, another daemon is already running — exit.
-    let _lock = match acquire_lock() {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!(
-                "rsc: another daemon instance is already running (lock held): {}",
-                e
-            );
-            process::exit(1);
-        }
-    };
 
     let mut daemon = Daemon::new(cfg);
     daemon.run();

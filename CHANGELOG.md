@@ -1,5 +1,97 @@
 # Changelog
 
+## [1.0.4] — 2026-07-11
+
+### Hotfix — Strip over-engineered logic that caused crash loop
+
+v1.0.3 introduced several "robustness" features that backfired on real
+hardware, causing the daemon to crash-loop (`init.svc.rsc: [restarting]`).
+This release reverts those changes and keeps only the genuinely useful
+fixes from the audit.
+
+#### Root cause of crash loop
+
+The `acquire_lock()` function (RSC-016) created a lock file at
+`/data/adb/rsc/rsc.lock` and called `flock(2)` on it. On the user's
+device, this failed — likely because the SELinux policy didn't grant
+the `rsc` domain permission to create new files in `/data/adb/rsc/`
+(the existing `rsc.log` and `config.toml` worked because they were
+pre-labeled, but `rsc.lock` created at runtime got a default label
+that `rsc` couldn't write to). The daemon exited with code 1, init
+restarted it, crash loop.
+
+#### What was stripped (reverted to v1.0.2 behavior)
+
+- **RSC-016: Lock file (`acquire_lock`)** — removed entirely. The lock
+  file was the crash cause. Concurrent daemon instances is an extremely
+  rare edge case (requires misconfigured init script) — not worth the
+  crash risk.
+- **RSC-008: Panic hook (`install_panic_hook`)** — removed. Calling MTK
+  functions from a panic handler is risky (could double-panic). With
+  `panic = "abort"`, the `--cleanup` oneshot at boot handles state
+  restoration.
+- **RSC-015: 60s heartbeat (`recv_with_timeout`)** — removed. The
+  README explicitly states "Zero CPU when idle. No polling, no timeout,
+  no fallback." The heartbeat contradicted this design philosophy.
+- **RSC-012: Sysfs read-back verification (`verify_sysctl`)** — removed.
+  MTK sysfs files (`disable_nafg`, `ntc_disable_nafg`) may be write-only
+  on some kernel revisions — reading them returns Err, causing
+  `enable_thermal_delimiter` to fail even when the write succeeded.
+- **RSC-005: MTK write rollback** — removed. The rollback logic was
+  half-baked — rolling back `current_cmd` doesn't undo `en_power_path`.
+  Simpler to just let the daemon retry on next tick.
+- **RSC-006: `cut_off_charging` reset+re-apply** — reverted to original
+  naive two-step write. The reset+re-apply pattern was only needed for
+  resume (FSM latches cut state, not uncut state).
+- **RSC-004: `interruptible_sleep`** — removed. The 100ms total sleep in
+  `resume_charging` is too short to delay SIGTERM meaningfully.
+- **RSC-021: Minimum hysteresis validation** — removed. This rejected
+  valid user configs like `cutoff=85, resume=82` (hysteresis=3), falling
+  back to defaults 80/70. The user should be able to set any values.
+- **RSC-010: `parse_failures` stat + `is_parse_failure`** — removed.
+  Marginal diagnostic value, added complexity.
+- **RSC-023: `signal_interrupts` stat** — removed. Same reason.
+- **RSC-014: `LAST_SIGNAL` atomic + SIGHUP warning** — removed.
+  Over-engineering for a rare signal.
+- **RSC-028: Manual `utf8_lossy` decoder** — reverted to original
+  `from_utf8().ok()`. Kernel uevents are always valid UTF-8; the manual
+  decoder was unnecessary complexity.
+- **RSC-019: `parse_uevent` field preference change** — reverted to
+  original fallback behavior (first-line parse preferred, explicit
+  fields as fallback).
+
+#### What was kept (genuine bug fixes)
+
+- **RSC-001**: Kernel-flip debounce ordering fix (CRITICAL real bug)
+- **RSC-002**: `--cleanup` log truncation guard (real data loss bug)
+- **RSC-007**: Config validation for `log_max_size_kb > 0` and
+  `log_keep > 0` (prevents I/O storm)
+- **RSC-009**: `recv_blocking` returns Err on WouldBlock instead of
+  busy-looping
+- **RSC-011**: TOCTOU fix in `write_sysctl` (match on `NotFound`)
+- **RSC-013**: Config errors in `--cleanup` logged to stderr
+- **RSC-017**: Log rotation counter only resets on successful rotation
+- **RSC-018**: `read_to_string` instead of single `read()` syscall
+- **RSC-020**: Log file created with mode `0o600`
+- **RSC-022**: `tick()` return type changed from `bool` to `()`
+- **RSC-024**: Unit tests for `Config::validate()`
+- **RSC-027**: `try_drain` uses `MSG_TRUNC` with null buffer
+- **RSC-029**: README version badge updated
+
+#### Verification
+
+- `cargo check`: PASS (0 errors, 0 warnings)
+- `cargo clippy`: PASS (0 warnings)
+- `cargo fmt --check`: PASS
+- `cargo test`: 26/26 tests pass (21 unit + 5 integration)
+
+#### Compatibility
+
+- No new files created at runtime (lock file removed)
+- No new sysfs reads (verify_sysctl removed)
+- Config validation is more permissive (hysteresis check removed)
+- All v1.0.2 behavior restored for MTK operations
+
 ## [1.0.3] — 2026-07-11
 
 ### Security & robustness — Comprehensive Rust audit fixes

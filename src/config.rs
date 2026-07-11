@@ -122,17 +122,6 @@ impl Config {
                 "log_keep must be > 0".to_string(),
             ));
         }
-        // RSC-021: Enforce minimum hysteresis to prevent rapid battery
-        // cycling (cut at 80, resume at 79, charge back to 80, ...) which
-        // degrades lithium-ion battery health.
-        const MIN_HYSTERESIS: u8 = 5;
-        let hysteresis = self.cutoff.saturating_sub(self.resume);
-        if hysteresis < MIN_HYSTERESIS {
-            return Err(ConfigError::InvalidRange(format!(
-                "hysteresis (cutoff - resume = {}) must be >= {} to prevent battery cycling",
-                hysteresis, MIN_HYSTERESIS
-            )));
-        }
         Ok(())
     }
 }
@@ -207,28 +196,6 @@ mod tests {
             ..Config::default()
         };
         assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_insufficient_hysteresis_rejected() {
-        // 80 - 79 = 1 < MIN_HYSTERESIS(5)
-        let cfg = Config {
-            cutoff: 80,
-            resume: 79,
-            ..Config::default()
-        };
-        assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_minimum_hysteresis_accepted() {
-        // 80 - 75 = 5 >= MIN_HYSTERESIS(5)
-        let cfg = Config {
-            cutoff: 80,
-            resume: 75,
-            ..Config::default()
-        };
-        assert!(cfg.validate().is_ok());
     }
 
     #[test]
