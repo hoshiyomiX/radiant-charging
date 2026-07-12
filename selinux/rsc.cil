@@ -209,7 +209,13 @@
 ; Without this rule, daemon can mkdir but can't create log file:
 ;   avc: denied { create } for comm="rsc" name="rsc.log"
 ;     tcontext=u:object_r:adb_data_file:s0 tclass=file
-(allow rsc adb_data_file_30_0 (file (create write open getattr append)))
+; RSC-031: Added `read` permission so config.toml (which inherits the parent
+; adb_data_file:s0 label when pushed before restorecon) can be read by rsc.
+; Previously only create/write/open/getattr/append were granted — config.toml
+; pushed by user via adb push got adb_data_file:s0 label (not rsc_data_file:s0
+; because file_contexts only applies at restorecon/boot), causing EACCES on
+; fs::read_to_string. Error logged as: "io: Permission denied (os error 13)".
+(allow rsc adb_data_file_30_0 (file (create read write open getattr append)))
 
 ; Suppress denial for /sys/kernel/mm/ traversal (Rust stdlib traverses parent dirs)
 (dontaudit rsc sysfs_mm (dir (search)))

@@ -1,5 +1,74 @@
 # Changelog
 
+## [1.0.7] — 2026-07-12
+
+### Fixed — SELinux: allow rsc to read config.toml with parent label (RSC-031)
+
+**Problem**: User log showed:
+```
+[INFO seq=2] rsc starting ... config_source=default
+[ERROR seq=3] config load failed — using defaults err="io: Permission denied (os error 13)"
+```
+
+Service running, no AVC denied visible — but `fs::read_to_string` on
+`/data/adb/rsc/config.toml` returned EACCES.
+
+**Root cause** (Denial Delta Analysis):
+- file_contexts.patch maps `/data/adb/rsc(/.*)?` to `rsc_data_file:s0`
+- rsc.cil grants `rsc` domain `read` permission on `rsc_data_file` — correct
+- BUT: file_contexts only applies at boot or `restorecon`. When user
+  pushes `config.toml` via `adb push` after install, the file inherits
+  the parent directory's label (`adb_data_file:s0`), NOT `rsc_data_file:s0`
+- rsc.cil line 212 granted `rsc` domain these perms on `adb_data_file_30_0`
+  (file class): `create write open getattr append` — **NO `read`!**
+- So `fs::read_to_string` (which needs `read`) → EACCES → fallback to
+  default config
+
+The daemon could WRITE to rsc.log (because `create write open append`
+were granted) but could NOT READ config.toml (because `read` was missing).
+This is why the log file existed but config wasn't loaded.
+
+**Fix**: Added `read` to the `adb_data_file_30_0` file permission in
+both:
+- `selinux/rsc.cil` (source CIL patch)
+- `selinux/vendor_sepolicy.cil.patched` (pre-patched CIL for install.sh)
+
+New rule:
+```
+(allow rsc adb_data_file_30_0 (file (create read write open getattr append)))
+```
+
+This allows rsc to read config.toml even when the file has the parent
+`adb_data_file:s0` label (i.e., user pushed it without running
+`restorecon`).
+
+**Important for existing installs**: This fix requires re-installing the
+SELinux policy (re-run `selinux/install.sh`) and rebooting. The binary
+itself is unchanged — only the SELinux CIL policy was updated.
+
+**Alternative workaround** (without re-install): Run `restorecon` on
+the config file to apply the correct `rsc_data_file:s0` label:
+```bash
+adb shell restorecon /data/adb/rsc/config.toml
+```
+This relabels the file to match file_contexts, so the existing
+`rsc_data_file read` permission applies.
+
+#### Files changed
+
+- `selinux/rsc.cil`: added `read` to `adb_data_file_30_0` file allow rule
+  (line 218)
+- `selinux/vendor_sepolicy.cil.patched`: same change (line 13341)
+- `Cargo.toml`: version bump 1.0.6 → 1.0.7
+- `README.md`: version badge updated
+- `CHANGELOG.md`: this entry
+
+#### Verification
+
+- `python3 selinux/check_cil.py selinux/rsc.cil`: ALL CHECKS PASS
+- cargo check + clippy + fmt: PASS (binary unchanged, only CIL modified)
+- cargo test: 30/30 tests pass
+
 ## [1.0.6] — 2026-07-11
 
 ### Fixed — Config load errors now logged to rsc.log (RSC-030)

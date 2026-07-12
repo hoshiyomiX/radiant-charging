@@ -13338,7 +13338,7 @@
 ; Without this rule, daemon can mkdir but can't create log file:
 ;   avc: denied { create } for comm="rsc" name="rsc.log"
 ;     tcontext=u:object_r:adb_data_file:s0 tclass=file
-(allow rsc adb_data_file_30_0 (file (create write open getattr append)))
+(allow rsc adb_data_file_30_0 (file (create read write open getattr append)))
 
 ; Suppress denial for /sys/kernel/mm/ traversal (Rust stdlib traverses parent dirs)
 (dontaudit rsc sysfs_mm (dir (search)))

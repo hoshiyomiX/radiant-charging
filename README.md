@@ -1,6 +1,6 @@
 # rsc — Radiant Smart Charging
 
-[![Version](https://img.shields.io/badge/version-v1.0.6-blue.svg)](https://github.com/hoshiyomiX/radiant-smartcharging/releases/tag/v1.0.6)
+[![Version](https://img.shields.io/badge/version-v1.0.7-blue.svg)](https://github.com/hoshiyomiX/radiant-smartcharging/releases/tag/v1.0.7)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![CI](https://github.com/hoshiyomiX/radiant-smartcharging/actions/workflows/ci.yml/badge.svg)](https://github.com/hoshiyomiX/radiant-smartcharging/actions/workflows/ci.yml)
