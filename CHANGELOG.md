@@ -1,5 +1,67 @@
 # Changelog
 
+## [1.0.6] — 2026-07-11
+
+### Fixed — Config load errors now logged to rsc.log (RSC-030)
+
+**Problem**: User reported "custom set config.toml tidak terpakai justru
+memakai set default" despite service running with no AVC denials.
+
+**Root cause**: When `Config::load` failed (TOML syntax error, permission
+denied, file not found at expected path), `main.rs` fell back to
+`Config::default()` and only logged the error via `eprintln!` (stderr).
+On Android init services, stderr is typically not captured anywhere —
+the error was invisible. The user had no way to diagnose why their
+custom values weren't being applied.
+
+**Fix**:
+- `main.rs`: Track config source (`"file"` or `"default"`) and any load
+  error alongside the config. Pass both to `Daemon::run()`.
+- `Daemon::run()`: Log `config_source` field in the startup banner
+  (`rsc starting` line). If config load failed, log an ERROR-level
+  entry to `rsc.log` with the error message and a hint.
+
+**New startup log line format**:
+```
+[ts INFO seq=2] rsc starting event=startup version=1.0.6 cutoff=100% resume=70% debug=false stats_mode=event-driven config_source=file
+```
+
+If config load failed:
+```
+[ts ERROR seq=3] config load failed — using defaults event=error config_source=default err=parse: ... hint=check config.toml syntax/permissions
+```
+
+**Diagnostic command** (user can run after deploy):
+```bash
+adb shell grep "rsc starting\|config load failed" /data/adb/rsc/rsc.log | tail -5
+```
+
+If `config_source=file` → custom config loaded successfully.
+If `config_source=default` + ERROR line → config load failed (check error message).
+If `config_source=default` + no ERROR → config file doesn't exist at `/data/adb/rsc/config.toml`.
+
+### Added — Config::load unit tests (RSC-030)
+
+4 new tests in `src/config.rs` that verify `Config::load` behavior:
+- `test_load_custom_config_from_file`: cutoff=85, resume=75 from file
+  → cfg.cutoff=85, cfg.resume=75 (NOT defaults)
+- `test_load_partial_config_uses_defaults_for_missing`: only cutoff in
+  file → cutoff from file, resume from default
+- `test_load_missing_file_returns_default`: nonexistent path → default
+  config, no error
+- `test_load_invalid_toml_returns_error`: invalid TOML → Err (not
+  silent default)
+
+These tests confirm the config loading logic itself is correct — the
+bug was purely in error visibility, not in parsing.
+
+### Verification
+
+- `cargo check`: PASS
+- `cargo clippy`: PASS (0 warnings)
+- `cargo fmt --check`: PASS
+- `cargo test`: 30/30 tests pass (25 unit + 5 integration)
+
 ## [1.0.5] — 2026-07-11
 
 ### Changed — Default cutoff 80→100 (auto-cut disabled by default)

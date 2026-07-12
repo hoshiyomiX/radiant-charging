@@ -218,4 +218,68 @@ mod tests {
         };
         assert!(cfg.validate().is_err());
     }
+
+    // RSC-030: Tests that verify Config::load actually picks up custom
+    // values from a TOML file (not just falling back to defaults).
+
+    #[test]
+    fn test_load_custom_config_from_file() {
+        let tmp = std::env::temp_dir().join(format!(
+            "rsc-config-test-{}-custom.toml",
+            std::process::id()
+        ));
+        std::fs::write(&tmp, "cutoff = 85\nresume = 75\ndebug = true\n").unwrap();
+        let cfg = Config::load(&tmp).expect("load should succeed");
+        let _ = std::fs::remove_file(&tmp);
+        // Verify custom values are loaded, NOT defaults
+        assert_eq!(
+            cfg.cutoff, 85,
+            "cutoff should be 85 from file, not 100 default"
+        );
+        assert_eq!(
+            cfg.resume, 75,
+            "resume should be 75 from file, not 70 default"
+        );
+        assert!(
+            cfg.debug,
+            "debug should be true from file, not false default"
+        );
+    }
+
+    #[test]
+    fn test_load_partial_config_uses_defaults_for_missing() {
+        let tmp = std::env::temp_dir().join(format!(
+            "rsc-config-test-{}-partial.toml",
+            std::process::id()
+        ));
+        // Only specify cutoff — resume should use default
+        std::fs::write(&tmp, "cutoff = 90\n").unwrap();
+        let cfg = Config::load(&tmp).expect("load should succeed");
+        let _ = std::fs::remove_file(&tmp);
+        assert_eq!(cfg.cutoff, 90, "cutoff should be 90 from file");
+        assert_eq!(cfg.resume, 70, "resume should be 70 default (not in file)");
+    }
+
+    #[test]
+    fn test_load_missing_file_returns_default() {
+        let path = "/nonexistent/path/that/does/not/exist.toml";
+        let cfg = Config::load(path).expect("missing file should return default, not error");
+        assert_eq!(cfg.cutoff, 100, "missing file → default cutoff 100");
+        assert_eq!(cfg.resume, 70, "missing file → default resume 70");
+    }
+
+    #[test]
+    fn test_load_invalid_toml_returns_error() {
+        let tmp = std::env::temp_dir().join(format!(
+            "rsc-config-test-{}-invalid.toml",
+            std::process::id()
+        ));
+        std::fs::write(&tmp, "cutoff = \nresume = 75\n").unwrap(); // invalid TOML
+        let result = Config::load(&tmp);
+        let _ = std::fs::remove_file(&tmp);
+        assert!(
+            result.is_err(),
+            "invalid TOML should return Err, not silently default"
+        );
+    }
 }

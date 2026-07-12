@@ -256,7 +256,7 @@ impl Daemon {
         self.log.log_kv(level, msg, &full_kv);
     }
 
-    fn run(&mut self) {
+    fn run(&mut self, config_source: &str, config_error: &Option<String>) {
         // --- BOOT START marker — one line per daemon lifetime so all
         // subsequent lines can be grouped by boot_id when reading the
         // log. This is the journald `_BOOT_ID` pattern, simplified.
@@ -281,8 +281,26 @@ impl Daemon {
                 ("resume", &format!("{}%", self.cfg.resume)),
                 ("debug", &self.cfg.debug.to_string()),
                 ("stats_mode", "event-driven"),
+                ("config_source", config_source),
             ],
         );
+
+        // RSC-030: If config load failed, log the error so the user can
+        // see WHY their custom values were not applied. Previously this
+        // error only went to stderr (eprintln!) which is invisible on
+        // Android init services.
+        if let Some(err) = config_error {
+            self.log.log_kv(
+                "ERROR",
+                "config load failed — using defaults",
+                &[
+                    ("event", "error"),
+                    ("config_source", "default"),
+                    ("err", err),
+                    ("hint", "check config.toml syntax/permissions"),
+                ],
+            );
+        }
         self.log.log_kv(
             "INFO",
             "paths",
@@ -923,16 +941,21 @@ fn main() {
     }
 
     // --- Normal daemon mode ---
-    let cfg = match config::Config::load(CONFIG_PATH) {
-        Ok(c) => c,
+    // RSC-030: Load config and track whether it came from file or default.
+    // This is logged to rsc.log after logger init so the user can verify
+    // their custom values are actually being used.
+    let (cfg, config_source, config_error) = match config::Config::load(CONFIG_PATH) {
+        Ok(c) => (c, "file", None),
         Err(e) => {
             eprintln!("rsc: config load failed ({}), using defaults", e);
-            config::Config::default()
+            (config::Config::default(), "default", Some(e.to_string()))
         }
     };
 
     install_signal_handlers();
 
     let mut daemon = Daemon::new(cfg);
-    daemon.run();
+    // RSC-030: Pass config source + error to run() so they're logged
+    // to rsc.log after logger init (not just stderr).
+    daemon.run(config_source, &config_error);
 }
