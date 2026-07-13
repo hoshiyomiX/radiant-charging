@@ -1,5 +1,81 @@
 # Changelog
 
+## [1.0.8] — 2026-07-12
+
+### Changed — Log format redesign: pipe-separated columns (RSC-032)
+
+Redesigned the log line format for better readability while preserving
+all information. The old bracket-prefix format was hard to scan visually
+— message and key-value pairs ran together, making it difficult to
+distinguish fields at a glance.
+
+#### Old format (v1.0.7 and earlier)
+```
+[2026-07-12T11:23:22+08:00 INFO   seq=2] rsc starting event=startup version=1.0.8 cutoff=100% resume=70% debug=false stats_mode=event-driven config_source=default
+[2026-07-12T11:23:22+08:00 ERROR  seq=3] config load failed — using defaults event=error config_source=default err="io: Permission denied (os error 13)" hint="check config.toml syntax/permissions"
+```
+
+#### New format (v1.0.8)
+```
+2026-07-12 11:23:22 +08:00 | INFO  | #2   | rsc starting                             | version=1.0.8 cutoff=100% resume=70% debug=false config_source=default
+2026-07-12 11:23:22 +08:00 | ERROR | #3   | config load failed — using defaults      | err="io: Permission denied (os error 13)" hint="check config.toml syntax/permissions"
+```
+
+#### What changed
+
+1. **Pipe-separated columns** (` | `) replace bracket prefix `[...]`
+   - Clear visual separation between timestamp, level, seq, message, KV
+   - Easier to scan vertically — columns align across log lines
+
+2. **Timestamp format** — `YYYY-MM-DD HH:MM:SS +HH:MM` (space-separated)
+   - Old: `2026-07-12T11:23:22+08:00` (ISO 8601 with `T` and suffix)
+   - New: `2026-07-12 11:23:22 +08:00` (space-separated, offset separate)
+   - More readable, same information
+
+3. **Level center-padded to 5 chars**
+   - Old: left-padded `INFO ` / `ERROR` / `WARN ` / `DEBUG`
+   - New: center-padded (same result for 4-5 char levels, but logic is cleaner)
+   - All levels align vertically
+
+4. **Seq as `#N`** instead of `seq=N`
+   - Old: `seq=42` (part of bracket prefix)
+   - New: `#42` (standalone column, right-aligned to 4 chars)
+   - Easier to scan, stands out as sequence number
+
+5. **Message padded to 40 chars minimum**
+   - Old: message ran directly into KV pairs with single space
+   - New: message left-padded to 40 chars, KV starts in aligned column
+   - Long messages (>40 chars) flow naturally without truncation
+
+6. **KV pairs preserved as logfmt** in last column after ` | `
+   - Same `key=value` format, same escaping rules
+   - Tooling that parses logfmt KV pairs still works
+   - `grep "event=cutoff"` / `grep "config_source=file"` still work
+
+#### Backward compatibility
+
+- `grep "CUTTING OFF"` / `grep "thermal delimiter"` — still work (message
+  text in column 4)
+- `grep "ERROR"` / `grep "INFO"` — still work (level in column 2)
+- `grep "config_source"` / `grep "boot_id"` — still work (KV in column 5)
+- KV pairs still logfmt-parseable for tooling
+- Only the prefix structure changed (brackets → pipes)
+
+#### Files changed
+
+- `src/logger.rs`: `log_kv()` rewritten with pipe-separated column format
+- Added 2 unit tests for new format (pipe separators, level padding)
+- `Cargo.toml`: version bump 1.0.7 → 1.0.8
+- `README.md`: version badge updated
+- `CHANGELOG.md`: this entry
+
+#### Verification
+
+- `cargo check`: PASS
+- `cargo clippy`: PASS (0 warnings)
+- `cargo fmt --check`: PASS
+- `cargo test`: 32/32 tests pass (30 existing + 2 new format tests)
+
 ## [1.0.7] — 2026-07-12
 
 ### Fixed — SELinux: allow rsc to read config.toml with parent label (RSC-031)
